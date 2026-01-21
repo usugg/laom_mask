@@ -1,0 +1,72 @@
+# LAPO Training with HuggingFace Dataset
+# Using the FULL architecture from lapo-default
+
+project: "laom"
+group: "lapo_hf"
+name: "lapo_cheetah_hard_full_arch"
+seed: 0
+
+lapo:
+  # --- Training parameters (angepasst an Original) ---
+  num_epochs: 10          
+  batch_size: 512         
+  future_obs_offset: 10   
+  learning_rate: 0.0001   
+  warmup_epochs: 3
+  grad_norm: null
+  
+  # --- Model architecture (EXAKT wie lapo-default) ---
+  latent_action_dim: 128 
+  encoder_scale: 6        
+  encoder_num_res_blocks: 2 
+  encoder_deep: False     
+  frame_stack: 3
+  
+  # --- HuggingFace Dataset Configuration (Beibehalten) ---
+  use_hf_dataset: true
+  hf_dataset_name: "EpicPinkPenguin/visual_distracting_control_suite"
+  hf_config_name: "cheetah_run"
+  hf_split: "train"
+  hf_streaming: true
+  hf_buffer_size: 10000
+  
+  # HDF5 fallback
+  data_path: "data/test.hdf5"
+
+bc:
+  # --- Behavior Cloning Architecture (EXAKT wie default) ---
+  num_epochs: 10         
+  batch_size: 512         
+  learning_rate: 0.0001
+  weight_decay: 0.0 
+  warmup_epochs: 0
+  encoder_scale: 32       
+  encoder_num_res_blocks: 2
+  encoder_deep: False
+  dropout: 0.0
+  use_aug: False          
+  frame_stack: 3
+  
+  # Paths
+  data_path: "data/test.hdf5" # Wird ignoriert wenn HF Loader im Code priorisiert wird
+  dcs_backgrounds_path: "DAVIS/JPEGImages/480p"
+  dcs_backgrounds_split: "train"
+  eval_episodes: 5
+  eval_seed: 0
+
+decoder:
+  # --- Decoder Architecture (EXAKT wie default) ---
+  total_updates: 2500     
+  batch_size: 512
+  learning_rate: 0.0003
+  weight_decay: 0.0
+  warmup_epochs: 0
+  hidden_dim: 256         
+  use_aug: False        
+  
+  # Paths
+  data_path: "data/test.hdf5"
+  dcs_backgrounds_path: "DAVIS/JPEGImages/480p"
+  dcs_backgrounds_split: "train"
+  eval_episodes: 25
+  eval_seed: 0

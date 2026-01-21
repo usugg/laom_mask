@@ -6,6 +6,7 @@ import h5py
 import numpy as np
 import torch
 import torch.nn as nn
+from datasets import load_dataset
 from shimmy import DmControlCompatibilityV0
 from torch.utils.data import Dataset, IterableDataset
 
@@ -81,6 +82,147 @@ class DCSInMemoryDataset(Dataset):
         action = self.actions[traj_idx][transition_idx]
 
         return obs, next_obs, action
+
+
+class DCSLAPOInMemoryDataset(Dataset):
+    """LAPO dataset loading from HDF5 files"""
+    def __init__(self, hdf5_path, frame_stack=1, device="cpu", max_offset=1):
+        with h5py.File(hdf5_path, "r") as df:
+            self.observations = [torch.tensor(df[traj]["obs"][:], device=device) for traj in df.keys()]
+            self.actions = [torch.tensor(df[traj]["actions"][:], device=device) for traj in df.keys()]
+            self.img_hw = df.attrs["img_hw"]
+            self.act_dim = self.actions[0][0].shape[-1]
+
+        self.frame_stack = frame_stack
+        self.traj_len = self.observations[0].shape[0]
+        assert 1 <= max_offset < self.traj_len
+        self.max_offset = max_offset
+
+    def __get_padded_obs(self, traj_idx, idx):
+        # stacking frames
+        # : is not inclusive, so +1 is needed
+        min_obs_idx = max(0, idx - self.frame_stack + 1)
+        max_obs_idx = idx + 1
+        obs = self.observations[traj_idx][min_obs_idx:max_obs_idx]
+
+        # pad if at the beginning as in the wrapper (with the first frame)
+        if obs.shape[0] < self.frame_stack:
+            pad_img = obs[0][None]
+            obs = torch.concat([pad_img for _ in range(self.frame_stack - obs.shape[0])] + [obs])
+        obs = obs.permute((1, 2, 0, 3))
+        obs = obs.reshape(*obs.shape[:2], -1)
+
+        return obs
+
+    def __len__(self):
+        return len(self.actions) * (self.traj_len - self.max_offset)
+
+    def __getitem__(self, idx):
+        traj_idx, transition_idx = divmod(idx, self.traj_len - self.max_offset)
+        action = self.actions[traj_idx][transition_idx]
+
+        obs = self.__get_padded_obs(traj_idx, transition_idx)
+        next_obs = self.__get_padded_obs(traj_idx, transition_idx + 1)
+        offset = random.randint(1, self.max_offset)
+        future_obs = self.__get_padded_obs(traj_idx, transition_idx + offset)
+
+        return obs, next_obs, future_obs, action, (offset - 1)
+
+
+class DCSLAPOHFDataset(IterableDataset):
+    """LAPO dataset loading from HuggingFace Hub with streaming support"""
+    def __init__(
+        self,
+        dataset_name="EpicPinkPenguin/visual_distracting_control_suite",
+        config_name="cheetah_run_distractor_hard",
+        split="train",
+        frame_stack=3,
+        max_offset=1,
+        streaming=True,
+        buffer_size=10000,
+        device="cpu",
+    ):
+        self.dataset = load_dataset(
+            dataset_name,
+            name=config_name,
+            split=split,
+            streaming=streaming,
+        )
+        
+        self.frame_stack = frame_stack
+        self.max_offset = max_offset
+        self.buffer_size = buffer_size
+        self.device = device
+        
+        # Get metadata from first sample
+        first_sample = next(iter(self.dataset))
+        # Convert PIL image to numpy array to get shape
+        first_obs = np.array(first_sample["observation"])
+        self.img_hw = first_obs.shape[0]  # Assuming square images
+        self.act_dim = len(first_sample["action"])
+        
+        # Buffer for frame stacking
+        self.obs_buffer = []
+        self.action_buffer = []
+        
+    def _process_observation(self, obs_array):
+        """Convert observation to tensor and move to device"""
+        # Handle PIL images from HuggingFace
+        if hasattr(obs_array, 'mode'):  # PIL Image
+            obs_array = np.array(obs_array)
+        return torch.tensor(obs_array, dtype=torch.uint8, device=self.device)
+    
+    def _get_stacked_obs(self, buffer, idx):
+        """Stack frames from buffer"""
+        start_idx = max(0, idx - self.frame_stack + 1)
+        frames = buffer[start_idx:idx + 1]
+        
+        # Pad if at the beginning
+        if len(frames) < self.frame_stack:
+            pad_frame = frames[0]
+            frames = [pad_frame] * (self.frame_stack - len(frames)) + frames
+        
+        # Stack and reshape: (frame_stack, H, W, C) -> (H, W, frame_stack*C)
+        stacked = torch.stack(frames)  # (frame_stack, H, W, C)
+        stacked = stacked.permute((1, 2, 0, 3))  # (H, W, frame_stack, C)
+        stacked = stacked.reshape(*stacked.shape[:2], -1)  # (H, W, frame_stack*C)
+        
+        return stacked
+    
+    def __iter__(self):
+        """Iterate over the dataset with frame stacking and future observation sampling"""
+        self.obs_buffer = []
+        self.action_buffer = []
+        
+        for sample in self.dataset:
+            obs = self._process_observation(sample["observation"])
+            action = torch.tensor(sample["action"], dtype=torch.float32, device=self.device)
+            
+            self.obs_buffer.append(obs)
+            self.action_buffer.append(action)
+            
+            # Keep buffer size manageable
+            if len(self.obs_buffer) > self.buffer_size:
+                self.obs_buffer.pop(0)
+                self.action_buffer.pop(0)
+            
+            # Need at least max_offset + 1 frames to create a sample
+            if len(self.obs_buffer) >= self.max_offset + 1:
+                # Current observation index (relative to buffer)
+                current_idx = len(self.obs_buffer) - self.max_offset - 1
+                
+                # Get stacked observations
+                obs_stacked = self._get_stacked_obs(self.obs_buffer, current_idx)
+                next_obs_stacked = self._get_stacked_obs(self.obs_buffer, current_idx + 1)
+                
+                # Random offset for future observation
+                offset = random.randint(1, self.max_offset)
+                future_obs_stacked = self._get_stacked_obs(self.obs_buffer, current_idx + offset)
+                
+                # Get corresponding action
+                action_current = self.action_buffer[current_idx]
+                
+                yield obs_stacked, next_obs_stacked, future_obs_stacked, action_current, (offset - 1)
 
 
 class DCSLAOMInMemoryDataset(Dataset):

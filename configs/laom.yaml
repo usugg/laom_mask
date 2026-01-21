@@ -9,7 +9,7 @@ lapo:
   learning_rate: 0.0001
   weight_decay: 0.0
   warmup_epochs: 3
-  latent_action_dim: 8192
+  latent_action_dim: 128
   act_head_dim: 1024
   act_head_dropout: 0.0
   obs_head_dim: 1024
