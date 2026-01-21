@@ -1,0 +1,83 @@
+# LAOM Training with HuggingFace Dataset
+# Using the FULL architecture from laom-default
+
+project: "laom"
+group: "laom_hf"
+name: "laom_cheetah_hard_full_arch"
+seed: 0
+
+lapo:
+  # --- Training parameters ---
+  num_epochs: 10          
+  batch_size: 512         
+  use_aug: True
+  future_obs_offset: 10   
+  learning_rate: 0.0001   
+  weight_decay: 0.0
+  warmup_epochs: 3
+  grad_norm: null
+  
+  # --- Model architecture (LAOM specific) ---
+  latent_action_dim: 128 
+  act_head_dim: 1024
+  act_head_dropout: 0.0
+  obs_head_dim: 1024
+  obs_head_dropout: 0.0
+  encoder_scale: 6        
+  encoder_num_res_blocks: 2 
+  encoder_dropout: 0.0
+  encoder_norm_out: False
+  encoder_deep: False
+  target_tau: 0.001
+  target_update_every: 1
+  frame_stack: 3
+  
+  # --- HuggingFace Dataset Configuration ---
+  use_hf_dataset: true
+  hf_dataset_name: "EpicPinkPenguin/visual_distracting_control_suite"
+  hf_config_name: "cheetah_run"
+  hf_split: "train"
+  hf_streaming: true
+  hf_buffer_size: 10000
+  use_masked_obs: false  # Enable masked observation mode (multiply obs with binary mask)
+  
+  # HDF5 fallback
+  data_path: "data/test.hdf5"
+
+bc:
+  # --- Behavior Cloning Architecture ---
+  num_epochs: 10         
+  batch_size: 512         
+  learning_rate: 0.0001
+  weight_decay: 0.0 
+  warmup_epochs: 0
+  encoder_scale: 32       
+  encoder_num_res_blocks: 2
+  encoder_deep: False
+  dropout: 0.0
+  use_aug: False          
+  frame_stack: 3
+  
+  # Paths
+  data_path: "data/test.hdf5"
+  dcs_backgrounds_path: "DAVIS/JPEGImages/480p"
+  dcs_backgrounds_split: "train"
+  eval_episodes: 5
+  eval_seed: 0
+
+decoder:
+  # --- Decoder Architecture ---
+  total_updates: 2500     
+  batch_size: 512
+  learning_rate: 0.0003
+  weight_decay: 0.0
+  warmup_epochs: 0
+  hidden_dim: 256         
+  use_aug: False        
+  
+  # Paths
+  data_path: "data/test.hdf5"
+  dcs_backgrounds_path: "DAVIS/JPEGImages/480p"
+  dcs_backgrounds_split: "train"
+  eval_episodes: 25
+  eval_seed: 0

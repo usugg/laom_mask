@@ -22,6 +22,7 @@ from src.scheduler import linear_annealing_with_warmup
 from src.utils import (
     DCSInMemoryDataset,
     DCSLAOMInMemoryDataset,
+    DCSLAOMHFDataset,
     create_env_from_df,
     get_grad_norm,
     get_optim_groups,
@@ -60,7 +61,16 @@ class LAOMConfig:
     target_tau: float = 0.01
     target_update_every: int = 1
     frame_stack: int = 3
-    data_path: str = "data/test.hdf5"
+    
+    # Data source configuration
+    use_hf_dataset: bool = False  # Use HuggingFace dataset instead of HDF5
+    data_path: str = "data/test.hdf5"  # For HDF5 mode
+    hf_dataset_name: str = "EpicPinkPenguin/visual_distracting_control_suite"
+    hf_config_name: str = "cheetah_run"  # e.g., "cheetah_run_distractor_hard", "walker_walk_distractor_low"
+    hf_split: str = "train"
+    hf_streaming: bool = True  # Stream data instead of downloading everything
+    hf_buffer_size: int = 10000  # Buffer size for streaming
+    use_masked_obs: bool = False  # Use binary mask to mask observations
 
 
 @dataclass
@@ -115,14 +125,35 @@ class Config:
 
 
 def train_laom(config: LAOMConfig):
-    dataset = DCSLAOMInMemoryDataset(
-        config.data_path, max_offset=config.future_obs_offset, frame_stack=config.frame_stack, device=DEVICE
-    )
-    dataloader = DataLoader(
-        dataset,
-        batch_size=config.batch_size,
-        shuffle=True,
-    )
+    # Load dataset based on configuration
+    if config.use_hf_dataset:
+        print(f"Loading HuggingFace dataset: {config.hf_dataset_name}/{config.hf_config_name}")
+        dataset = DCSLAOMHFDataset(
+            dataset_name=config.hf_dataset_name,
+            config_name=config.hf_config_name,
+            split=config.hf_split,
+            frame_stack=config.frame_stack,
+            max_offset=config.future_obs_offset,
+            streaming=config.hf_streaming,
+            buffer_size=config.hf_buffer_size,
+            use_masked_obs=config.use_masked_obs,
+            device=DEVICE,
+        )
+        # For IterableDataset, we don't use shuffle in DataLoader
+        dataloader = DataLoader(dataset, batch_size=config.batch_size)
+        # Estimate steps per epoch (approximate)
+        steps_per_epoch = 10_000_000 // (10 * config.batch_size)  # 10M steps in dataset, ~1000 steps/episode
+    else:
+        print(f"Loading HDF5 dataset: {config.data_path}")
+        dataset = DCSLAOMInMemoryDataset(
+            config.data_path, max_offset=config.future_obs_offset, frame_stack=config.frame_stack, device=DEVICE
+        )
+        dataloader = DataLoader(
+            dataset,
+            batch_size=config.batch_size,
+            shuffle=True,
+        )
+        steps_per_epoch = len(dataloader)
     lapo = LAOM(
         shape=(3 * config.frame_stack, dataset.img_hw, dataset.img_hw),
         latent_act_dim=config.latent_action_dim,
@@ -166,8 +197,8 @@ def train_laom(config: LAOMConfig):
     state_act_probe_optim = torch.optim.Adam(state_act_linear_probe.parameters(), lr=config.learning_rate)
 
     # scheduler setup
-    total_updates = len(dataloader) * config.num_epochs
-    warmup_updates = len(dataloader) * config.warmup_epochs
+    total_updates = steps_per_epoch * config.num_epochs
+    warmup_updates = steps_per_epoch * config.warmup_epochs
     scheduler = linear_annealing_with_warmup(optim, warmup_updates, total_updates)
 
     start_time = time.time()
@@ -175,9 +206,11 @@ def train_laom(config: LAOMConfig):
     total_tokens = 0
     for epoch in trange(config.num_epochs, desc="Epochs"):
         lapo.train()
+        epoch_steps = 0
         for i, batch in enumerate(dataloader):
             total_tokens += config.batch_size
             total_iterations += 1
+            epoch_steps += 1
 
             obs, next_obs, future_obs, actions, states, offset = [b.to(DEVICE) for b in batch]
 
@@ -253,6 +286,30 @@ def train_laom(config: LAOMConfig):
                     "lapo/online_obs_norm": torch.norm(latent_next_obs, p=2, dim=-1).mean().item(),
                     "lapo/latent_act_norm": torch.norm(latent_action, p=2, dim=-1).mean().item(),
                     "lapo/epoch": epoch,
+                    "lapo/total_steps": total_iterations,
+                }
+            )
+            
+            # For streaming datasets, limit steps per epoch
+            if config.use_hf_dataset and epoch_steps >= steps_per_epoch:
+                break
+        
+        # logging reconstruction of next state (at end of each epoch)
+        with torch.no_grad():
+            # Get the last batch's predictions for visualization
+            # Reconstruct next_obs from latent representation
+            from torchvision.utils import make_grid
+            from src.utils import unnormalize_img
+            
+            obs_example = [unnormalize_img(next_obs[0][i : i + 3]) for i in range(0, 3 * config.frame_stack, 3)]
+            # For LAOM, we predict latent next obs, so we need to decode it through the encoder
+            # Since we don't have a decoder, we'll just visualize the target
+            next_obs_target_vis = target_lapo.encoder(next_obs[:1])  # Get one sample
+            # We can't directly visualize latent space, so skip reconstruction visualization
+            # Instead, just log that we're training
+            wandb.log(
+                {
+                    "lapo/epoch_complete": epoch,
                     "lapo/total_steps": total_iterations,
                 }
             )
@@ -522,12 +579,12 @@ def train(config: Config):
     # stage 1: pretraining lapo on unlabeled dataset
     lapo = train_laom(config=config.lapo)
     # stage 2: pretraining bc on latent actions
-    actor = train_bc(lam=lapo, config=config.bc)
+    #actor = train_bc(lam=lapo, config=config.bc)
     # stage 3: finetune on labeles ground-truth actions
-    action_decoder = train_act_decoder(actor=actor, config=config.decoder, bc_config=config.bc)
+   # action_decoder = train_act_decoder(actor=actor, config=config.decoder, bc_config=config.bc)
 
     run.finish()
-    return lapo, actor, action_decoder
+    return lapo
 
 
 if __name__ == "__main__":

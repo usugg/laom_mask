@@ -248,6 +248,132 @@ class DCSLAPOHFDataset(IterableDataset):
                 yield obs_stacked, next_obs_stacked, future_obs_stacked, action_current, (offset - 1)
 
 
+class DCSLAOMHFDataset(IterableDataset):
+    """LAOM dataset loading from HuggingFace Hub with streaming support"""
+    def __init__(
+        self,
+        dataset_name="EpicPinkPenguin/visual_distracting_control_suite",
+        config_name="cheetah_run_distractor_hard",
+        split="train",
+        frame_stack=3,
+        max_offset=1,
+        streaming=True,
+        buffer_size=10000,
+        use_masked_obs=False,
+        device="cpu",
+    ):
+        self.dataset = load_dataset(
+            dataset_name,
+            name=config_name,
+            split=split,
+            streaming=streaming,
+        )
+        
+        self.frame_stack = frame_stack
+        self.max_offset = max_offset
+        self.buffer_size = buffer_size
+        self.use_masked_obs = use_masked_obs
+        self.device = device
+        
+        # Get metadata from first sample
+        first_sample = next(iter(self.dataset))
+        # Convert PIL image to numpy array to get shape
+        first_obs = np.array(first_sample["observation"])
+        self.img_hw = first_obs.shape[0]  # Assuming square images
+        self.act_dim = len(first_sample["action"])
+        self.state_dim = len(first_sample["state"])
+        
+        # Buffer for frame stacking
+        self.obs_buffer = []
+        self.action_buffer = []
+        self.state_buffer = []
+        
+    def _process_observation(self, obs_array):
+        """Convert observation to tensor and move to device"""
+        # Handle PIL images from HuggingFace
+        if hasattr(obs_array, 'mode'):  # PIL Image
+            obs_array = np.array(obs_array)
+        return torch.tensor(obs_array, dtype=torch.uint8, device=self.device)
+    
+    def _get_stacked_obs(self, buffer, idx):
+        """Stack frames from buffer"""
+        start_idx = max(0, idx - self.frame_stack + 1)
+        frames = buffer[start_idx:idx + 1]
+        
+        # Pad if at the beginning
+        if len(frames) < self.frame_stack:
+            pad_frame = frames[0]
+            frames = [pad_frame] * (self.frame_stack - len(frames)) + frames
+        
+        # Stack and reshape: (frame_stack, H, W, C) -> (H, W, frame_stack*C)
+        stacked = torch.stack(frames)  # (frame_stack, H, W, C)
+        stacked = stacked.permute((1, 2, 0, 3))  # (H, W, frame_stack, C)
+        stacked = stacked.reshape(*stacked.shape[:2], -1)  # (H, W, frame_stack*C)
+        
+        return stacked
+    
+    def __iter__(self):
+        """Iterate over the dataset with frame stacking and future observation sampling"""
+        self.obs_buffer = []
+        self.action_buffer = []
+        self.state_buffer = []
+        
+        for sample in self.dataset:
+            obs = self._process_observation(sample["observation"])
+            action = torch.tensor(sample["action"], dtype=torch.float32, device=self.device)
+            state = torch.tensor(sample["state"], dtype=torch.float32, device=self.device)
+            
+            # Apply mask if enabled
+            if self.use_masked_obs:
+                # Load mask from HuggingFace sample
+                mask = sample["mask"]
+                # Convert mask to tensor (handle PIL Image or numpy array)
+                if hasattr(mask, 'mode'):  # PIL Image
+                    mask = np.array(mask)
+                mask = torch.tensor(mask, dtype=torch.float32, device=self.device)
+                
+                # Expand mask from (H, W) to (H, W, 3) for RGB channels
+                if mask.ndim == 2:
+                    mask = mask.unsqueeze(-1).repeat(1, 1, 3)
+                
+                # Normalize mask to 0-1 range if needed
+                if mask.max() > 1.0:
+                    mask = mask / 255.0
+                
+                # Apply mask to observation (element-wise multiplication)
+                obs = obs.float() * mask
+                obs = obs.to(torch.uint8)
+            
+            self.obs_buffer.append(obs)
+            self.action_buffer.append(action)
+            self.state_buffer.append(state)
+            
+            # Keep buffer size manageable
+            if len(self.obs_buffer) > self.buffer_size:
+                self.obs_buffer.pop(0)
+                self.action_buffer.pop(0)
+                self.state_buffer.pop(0)
+            
+            # Need at least max_offset + 1 frames to create a sample
+            if len(self.obs_buffer) >= self.max_offset + 1:
+                # Current observation index (relative to buffer)
+                current_idx = len(self.obs_buffer) - self.max_offset - 1
+                
+                # Get stacked observations
+                obs_stacked = self._get_stacked_obs(self.obs_buffer, current_idx)
+                next_obs_stacked = self._get_stacked_obs(self.obs_buffer, current_idx + 1)
+                
+                # Random offset for future observation
+                offset = random.randint(1, self.max_offset)
+                future_obs_stacked = self._get_stacked_obs(self.obs_buffer, current_idx + offset)
+                
+                # Get corresponding action and state
+                action_current = self.action_buffer[current_idx]
+                state_current = self.state_buffer[current_idx]
+                
+                yield obs_stacked, next_obs_stacked, future_obs_stacked, action_current, state_current, (offset - 1)
+
+
 class DCSLAOMInMemoryDataset(Dataset):
     def __init__(self, hdf5_path, frame_stack=1, device="cpu", max_offset=1):
         with h5py.File(hdf5_path, "r") as df:
