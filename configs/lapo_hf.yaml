@@ -29,6 +29,7 @@ lapo:
   hf_split: "train"
   hf_streaming: true
   hf_buffer_size: 10000
+  use_masked_obs: false  # Enable masked observation mode (multiply obs with binary mask)
   
   # HDF5 fallback
   data_path: "data/test.hdf5"

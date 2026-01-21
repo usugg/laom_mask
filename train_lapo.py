@@ -61,6 +61,7 @@ class LAPOConfig:
     hf_split: str = "train"
     hf_streaming: bool = True  # Stream data instead of downloading everything
     hf_buffer_size: int = 10000  # Buffer size for streaming
+    use_masked_obs: bool = False  # Use binary mask to mask observations
 
 
 @dataclass
@@ -126,6 +127,7 @@ def train_lapo(config: LAPOConfig):
             max_offset=config.future_obs_offset,
             streaming=config.hf_streaming,
             buffer_size=config.hf_buffer_size,
+            use_masked_obs=config.use_masked_obs,
             device=DEVICE,
         )
         # For IterableDataset, we don't use shuffle in DataLoader

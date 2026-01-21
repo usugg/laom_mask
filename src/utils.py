@@ -140,6 +140,7 @@ class DCSLAPOHFDataset(IterableDataset):
         max_offset=1,
         streaming=True,
         buffer_size=10000,
+        use_masked_obs=False,
         device="cpu",
     ):
         self.dataset = load_dataset(
@@ -152,6 +153,7 @@ class DCSLAPOHFDataset(IterableDataset):
         self.frame_stack = frame_stack
         self.max_offset = max_offset
         self.buffer_size = buffer_size
+        self.use_masked_obs = use_masked_obs
         self.device = device
         
         # Get metadata from first sample
@@ -197,6 +199,27 @@ class DCSLAPOHFDataset(IterableDataset):
         for sample in self.dataset:
             obs = self._process_observation(sample["observation"])
             action = torch.tensor(sample["action"], dtype=torch.float32, device=self.device)
+            
+            # Apply mask if enabled
+            if self.use_masked_obs:
+                # Load mask from HuggingFace sample
+                mask = sample["mask"]
+                # Convert mask to tensor (handle PIL Image or numpy array)
+                if hasattr(mask, 'mode'):  # PIL Image
+                    mask = np.array(mask)
+                mask = torch.tensor(mask, dtype=torch.float32, device=self.device)
+                
+                # Expand mask from (H, W) to (H, W, 3) for RGB channels
+                if mask.ndim == 2:
+                    mask = mask.unsqueeze(-1).repeat(1, 1, 3)
+                
+                # Normalize mask to 0-1 range if needed
+                if mask.max() > 1.0:
+                    mask = mask / 255.0
+                
+                # Apply mask to observation (element-wise multiplication)
+                obs = obs.float() * mask
+                obs = obs.to(torch.uint8)
             
             self.obs_buffer.append(obs)
             self.action_buffer.append(action)
