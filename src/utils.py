@@ -6,6 +6,7 @@ import h5py
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from datasets import load_dataset
 from shimmy import DmControlCompatibilityV0
 from torch.utils.data import Dataset, IterableDataset
@@ -141,6 +142,7 @@ class DCSLAPOHFDataset(IterableDataset):
         streaming=True,
         buffer_size=10000,
         use_masked_obs=False,
+        clip_actions=False,
         device="cpu",
     ):
         self.dataset = load_dataset(
@@ -154,6 +156,7 @@ class DCSLAPOHFDataset(IterableDataset):
         self.max_offset = max_offset
         self.buffer_size = buffer_size
         self.use_masked_obs = use_masked_obs
+        self.clip_actions = clip_actions
         self.device = device
         
         # Get metadata from first sample
@@ -199,6 +202,9 @@ class DCSLAPOHFDataset(IterableDataset):
         for sample in self.dataset:
             obs = self._process_observation(sample["observation"])
             action = torch.tensor(sample["action"], dtype=torch.float32, device=self.device)
+            # Clip actions to [-1, 1] range if enabled
+            if self.clip_actions:
+                action = torch.clamp(action, min=-1.0, max=1.0)
             
             # Apply mask if enabled
             if self.use_masked_obs:
@@ -321,6 +327,9 @@ class DCSLAOMHFDataset(IterableDataset):
         for sample in self.dataset:
             obs = self._process_observation(sample["observation"])
             action = torch.tensor(sample["action"], dtype=torch.float32, device=self.device)
+            # Clip actions to [-1, 1] range if enabled
+            if self.clip_actions:
+                action = torch.clamp(action, min=-1.0, max=1.0)
             state = torch.tensor(sample["state"], dtype=torch.float32, device=self.device)
             
             # Apply mask if enabled
@@ -475,6 +484,85 @@ def normalize_img(img):
 
 def unnormalize_img(img):
     return ((img / 2.0) + 0.5) * 255.0
+
+
+def upscale_image(img: torch.Tensor, target_size: int = 224, mode: str = 'bilinear') -> torch.Tensor:
+    """
+    Upscale image from current size to target_size using interpolation.
+    
+    Args:
+        img: Input tensor of shape (B, C, H, W) or (C, H, W)
+        target_size: Target size (assumes square images)
+        mode: Interpolation mode ('bilinear', 'bicubic', 'nearest')
+    
+    Returns:
+        Upscaled tensor of shape (B, C, target_size, target_size) or (C, target_size, target_size)
+    """
+    if img.ndim == 3:
+        # Add batch dimension
+        img = img.unsqueeze(0)
+        squeeze_output = True
+    else:
+        squeeze_output = False
+    
+    # Convert uint8 to float for interpolation
+    original_dtype = img.dtype
+    if img.dtype == torch.uint8:
+        img = img.float()
+    
+    # Upscale using interpolation
+    upscaled = F.interpolate(
+        img,
+        size=(target_size, target_size),
+        mode=mode,
+        align_corners=False if mode != 'nearest' else None
+    )
+    
+    # Convert back to original dtype if needed
+    if original_dtype == torch.uint8:
+        upscaled = upscaled.to(torch.uint8)
+    
+    if squeeze_output:
+        upscaled = upscaled.squeeze(0)
+    
+    return upscaled
+
+
+def preprocess_for_dinov2(img: torch.Tensor) -> torch.Tensor:
+    """
+    Apply DINOv2 preprocessing (ImageNet normalization).
+    
+    Args:
+        img: Input tensor of shape (B, C, H, W) or (C, H, W)
+            Expected to be in range [0, 255] with dtype uint8 or float
+    
+    Returns:
+        Normalized tensor in range roughly [-2, 2]
+    """
+    # Convert to float if needed
+    if img.dtype == torch.uint8:
+        img = img.float()
+    
+    # Normalize to [0, 1]
+    if img.max() > 1.0:
+        img = img / 255.0
+    
+    # ImageNet normalization (DINOv2 uses these stats)
+    mean = torch.tensor([0.485, 0.456, 0.406], device=img.device)
+    std = torch.tensor([0.229, 0.224, 0.225], device=img.device)
+    
+    # Reshape mean and std for broadcasting
+    if img.ndim == 4:  # (B, C, H, W)
+        mean = mean.view(1, 3, 1, 1)
+        std = std.view(1, 3, 1, 1)
+    else:  # (C, H, W)
+        mean = mean.view(3, 1, 1)
+        std = std.view(3, 1, 1)
+    
+    # Normalize
+    img = (img - mean) / std
+    
+    return img
 
 
 def weight_init(m):

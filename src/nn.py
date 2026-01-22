@@ -575,3 +575,104 @@ class IDMLabels(nn.Module):
         obs_emb, next_obs_emb = self.encoder(torch.concat([obs, next_obs])).split(obs.shape[0])
         pred_action = self.idm_head(obs_emb.flatten(1), next_obs_emb.flatten(1))
         return pred_action
+
+
+class LAOMDINOv2(nn.Module):
+    """
+    LAOM that works with DINOv2 features instead of raw pixels.
+    
+    Instead of using a CNN encoder, this model takes pre-extracted DINOv2 features
+    and learns latent actions in the feature space.
+    """
+    
+    def __init__(
+        self,
+        feature_dim=768,  # DINOv2-base output dimension
+        latent_act_dim=128,
+        act_head_dim=1024,
+        act_head_dropout=0.0,
+        obs_head_dim=1024,
+        obs_head_dropout=0.0,
+    ):
+        """
+        Initialize LAOMDINOv2.
+        
+        Args:
+            feature_dim: Dimension of DINOv2 features (768 for base, 384 for small, etc.)
+            latent_act_dim: Dimension of latent action space
+            act_head_dim: Hidden dimension for action head
+            act_head_dropout: Dropout for action head
+            obs_head_dim: Hidden dimension for observation head
+            obs_head_dropout: Dropout for observation head
+        """
+        super().__init__()
+        
+        self.feature_dim = feature_dim
+        self.latent_act_dim = latent_act_dim
+        
+        # No CNN encoder needed - we work directly with features!
+        # Just use layer norm for stability
+        self.feature_norm = nn.LayerNorm(feature_dim, elementwise_affine=False)
+        
+        # Action head: predicts latent actions from (obs_features, next_obs_features)
+        self.act_head = LatentActHead(
+            latent_act_dim, 
+            feature_dim, 
+            act_head_dim, 
+            dropout=act_head_dropout
+        )
+        
+        # Observation head: predicts next_obs_features from (obs_features, latent_action)
+        self.obs_head = LatentObsHead(
+            latent_act_dim, 
+            feature_dim, 
+            obs_head_dim, 
+            dropout=obs_head_dropout
+        )
+        
+        # For compatibility with existing code
+        self.final_encoder_shape = (feature_dim,)
+        
+        self.apply(weight_init)
+    
+    def forward(self, obs_features, next_obs_features):
+        """
+        Forward pass with DINOv2 features.
+        
+        Args:
+            obs_features: Tensor of shape (B, feature_dim) - current observation features
+            next_obs_features: Tensor of shape (B, feature_dim) - next observation features
+        
+        Returns:
+            latent_next_obs: Predicted next observation features (B, feature_dim)
+            latent_action: Predicted latent action (B, latent_act_dim)
+            obs_features: Detached observation features (B, feature_dim)
+        """
+        # Normalize features
+        obs_features_norm = self.feature_norm(obs_features)
+        next_obs_features_norm = self.feature_norm(next_obs_features)
+        
+        # Predict latent action from observation pair
+        latent_action = self.act_head(obs_features_norm, next_obs_features_norm)
+        
+        # Predict next observation features from current obs and latent action
+        latent_next_obs = self.obs_head(obs_features_norm.detach(), latent_action)
+        
+        return latent_next_obs, latent_action, obs_features.detach()
+    
+    @torch.no_grad()
+    def label(self, obs_features, next_obs_features):
+        """
+        Generate latent action labels (for BC training).
+        
+        Args:
+            obs_features: Tensor of shape (B, feature_dim)
+            next_obs_features: Tensor of shape (B, feature_dim)
+        
+        Returns:
+            latent_action: Tensor of shape (B, latent_act_dim)
+        """
+        obs_features_norm = self.feature_norm(obs_features)
+        next_obs_features_norm = self.feature_norm(next_obs_features)
+        latent_action = self.act_head(obs_features_norm, next_obs_features_norm)
+        return latent_action

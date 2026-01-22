@@ -1,0 +1,46 @@
+# LAOM with DINOv2 - HuggingFace Dataset Configuration
+
+project: "laom"
+group: "laom_dinov2_hf"
+name: "laom_dinov2_cheetah_vanilla"
+seed: 0
+
+lapo:
+  # --- DINOv2 Settings ---
+  use_dinov2: true
+  dinov2_model_name: "facebook/dinov2-base"  # 768-dim features
+  upscale_size: 224  # DINOv2 expects 224x224 images
+  freeze_dinov2: true
+  
+  # --- Training parameters ---
+  num_epochs: 10          
+  batch_size: 512  # Can be larger since working with features
+  use_aug: false  # Augmentation happens before DINOv2
+  future_obs_offset: 10   
+  learning_rate: 0.0001   
+  weight_decay: 0.0
+  warmup_epochs: 3
+  grad_norm: null
+  
+  # --- Model architecture (LAOMDINOv2) ---
+  feature_dim: 2304  # DINOv2-base (768) * 3 frames = 2304
+  latent_action_dim: 128 
+  act_head_dim: 1024
+  act_head_dropout: 0.0
+  obs_head_dim: 1024
+  obs_head_dropout: 0.0
+  target_tau: 0.001
+  target_update_every: 1
+  frame_stack: 3
+  
+  # --- HuggingFace Dataset Configuration ---
+  use_hf_dataset: true
+  hf_dataset_name: "EpicPinkPenguin/visual_distracting_control_suite"
+  hf_config_name: "cheetah_run"
+  hf_split: "train"
+  hf_streaming: true
+  hf_buffer_size: 10000
+  use_masked_obs: false  # Apply mask before upscaling
+  
+  # HDF5 fallback
+  data_path: "data/test.hdf5"

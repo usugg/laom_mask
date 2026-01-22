@@ -22,6 +22,7 @@ lapo:
   target_tau: 0.001
   target_update_every: 1
   frame_stack: 3
+  clip_actions: false  # Clip actions to [-1, 1] range
   # TODO: change to your data path
   data_path: "data/example-data.hdf5"
 

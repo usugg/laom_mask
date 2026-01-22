@@ -71,6 +71,7 @@ class LAOMConfig:
     hf_streaming: bool = True  # Stream data instead of downloading everything
     hf_buffer_size: int = 10000  # Buffer size for streaming
     use_masked_obs: bool = False  # Use binary mask to mask observations
+    clip_actions: bool = False  # Clip actions to [-1, 1] range
 
 
 @dataclass
@@ -137,6 +138,7 @@ def train_laom(config: LAOMConfig):
             streaming=config.hf_streaming,
             buffer_size=config.hf_buffer_size,
             use_masked_obs=config.use_masked_obs,
+            clip_actions=config.clip_actions,
             device=DEVICE,
         )
         # For IterableDataset, we don't use shuffle in DataLoader
