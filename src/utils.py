@@ -266,6 +266,7 @@ class DCSLAOMHFDataset(IterableDataset):
         streaming=True,
         buffer_size=10000,
         use_masked_obs=False,
+        clip_actions=False,
         device="cpu",
     ):
         self.dataset = load_dataset(
@@ -279,6 +280,7 @@ class DCSLAOMHFDataset(IterableDataset):
         self.max_offset = max_offset
         self.buffer_size = buffer_size
         self.use_masked_obs = use_masked_obs
+        self.clip_actions = clip_actions
         self.device = device
         
         # Get metadata from first sample
