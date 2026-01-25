@@ -62,6 +62,7 @@ class LAPOConfig:
     hf_streaming: bool = True  # Stream data instead of downloading everything
     hf_buffer_size: int = 10000  # Buffer size for streaming
     use_masked_obs: bool = False  # Use binary mask to mask observations
+    use_masked_loss: bool = False  # Compute loss only on masked regions (requires use_masked_obs=true)
     clip_actions: bool = False  # Clip actions to [-1, 1] range
 
 
@@ -180,7 +181,14 @@ def train_lapo(config: LAPOConfig):
             total_steps += 1
             epoch_steps += 1
 
-            obs, next_obs, future_obs, actions, _ = [b.to(DEVICE) for b in batch]
+            # Unpack batch - dataset always returns mask now
+            obs, next_obs, future_obs, actions, _, mask = batch
+            obs = obs.to(DEVICE)
+            next_obs = next_obs.to(DEVICE)
+            future_obs = future_obs.to(DEVICE)
+            actions = actions.to(DEVICE)
+            mask = mask.to(DEVICE)
+            
             obs = normalize_img(obs.permute((0, 3, 1, 2)))
             next_obs = normalize_img(next_obs.permute((0, 3, 1, 2)))
             future_obs = normalize_img(future_obs.permute((0, 3, 1, 2)))
@@ -188,7 +196,21 @@ def train_lapo(config: LAPOConfig):
             # update lapo
             with torch.autocast(DEVICE, dtype=torch.bfloat16):
                 pred_next_obs, latent_action = lapo(obs, future_obs)
-                loss = F.mse_loss(pred_next_obs, next_obs)
+                
+                # Compute masked loss if enabled (mask is always available now)
+                if config.use_masked_loss:
+                    # The mask is already stacked by the dataset (via _get_stacked_obs)
+                    # So it has shape (B, H, W, frame_stack*C) just like the observations
+                    # Permute mask to match prediction shape: (B, H, W, frame_stack*C) -> (B, frame_stack*C, H, W)
+                    mask_permuted = mask.permute((0, 3, 1, 2))
+                    
+                    # Compute element-wise loss and apply mask
+                    loss_per_pixel = F.mse_loss(pred_next_obs, next_obs, reduction='none')
+                    masked_loss = loss_per_pixel * mask_permuted
+                    # Average only over masked pixels
+                    loss = masked_loss.sum() / (mask_permuted.sum() + 1e-8)
+                else:
+                    loss = F.mse_loss(pred_next_obs, next_obs)
 
             optim.zero_grad(set_to_none=True)
             loss.backward()

@@ -169,6 +169,7 @@ class DCSLAPOHFDataset(IterableDataset):
         # Buffer for frame stacking
         self.obs_buffer = []
         self.action_buffer = []
+        self.mask_buffer = []  # Buffer for masks when use_masked_obs is enabled
         
     def _process_observation(self, obs_array):
         """Convert observation to tensor and move to device"""
@@ -198,6 +199,7 @@ class DCSLAPOHFDataset(IterableDataset):
         """Iterate over the dataset with frame stacking and future observation sampling"""
         self.obs_buffer = []
         self.action_buffer = []
+        self.mask_buffer = []
         
         for sample in self.dataset:
             obs = self._process_observation(sample["observation"])
@@ -206,34 +208,35 @@ class DCSLAPOHFDataset(IterableDataset):
             if self.clip_actions:
                 action = torch.clamp(action, min=-1.0, max=1.0)
             
-            # Apply mask if enabled
+            # Always load mask from dataset (for potential use in masked loss)
+            mask = sample["mask"]
+            # Convert mask to tensor (handle PIL Image or numpy array)
+            if hasattr(mask, 'mode'):  # PIL Image
+                mask = np.array(mask)
+            mask_tensor = torch.tensor(mask, dtype=torch.float32, device=self.device)
+            
+            # Expand mask from (H, W) to (H, W, 3) for RGB channels
+            if mask_tensor.ndim == 2:
+                mask_tensor = mask_tensor.unsqueeze(-1).repeat(1, 1, 3)
+            
+            # Normalize mask to 0-1 range if needed
+            if mask_tensor.max() > 1.0:
+                mask_tensor = mask_tensor / 255.0
+            
+            # Apply mask to observation only if use_masked_obs is enabled
             if self.use_masked_obs:
-                # Load mask from HuggingFace sample
-                mask = sample["mask"]
-                # Convert mask to tensor (handle PIL Image or numpy array)
-                if hasattr(mask, 'mode'):  # PIL Image
-                    mask = np.array(mask)
-                mask = torch.tensor(mask, dtype=torch.float32, device=self.device)
-                
-                # Expand mask from (H, W) to (H, W, 3) for RGB channels
-                if mask.ndim == 2:
-                    mask = mask.unsqueeze(-1).repeat(1, 1, 3)
-                
-                # Normalize mask to 0-1 range if needed
-                if mask.max() > 1.0:
-                    mask = mask / 255.0
-                
-                # Apply mask to observation (element-wise multiplication)
-                obs = obs.float() * mask
+                obs = obs.float() * mask_tensor
                 obs = obs.to(torch.uint8)
             
             self.obs_buffer.append(obs)
             self.action_buffer.append(action)
+            self.mask_buffer.append(mask_tensor)  # Always store mask
             
             # Keep buffer size manageable
             if len(self.obs_buffer) > self.buffer_size:
                 self.obs_buffer.pop(0)
                 self.action_buffer.pop(0)
+                self.mask_buffer.pop(0)  # Always pop mask
             
             # Need at least max_offset + 1 frames to create a sample
             if len(self.obs_buffer) >= self.max_offset + 1:
@@ -251,7 +254,9 @@ class DCSLAPOHFDataset(IterableDataset):
                 # Get corresponding action
                 action_current = self.action_buffer[current_idx]
                 
-                yield obs_stacked, next_obs_stacked, future_obs_stacked, action_current, (offset - 1)
+                # Always return mask (stacked the same way as observations)
+                mask_stacked = self._get_stacked_obs(self.mask_buffer, current_idx)
+                yield obs_stacked, next_obs_stacked, future_obs_stacked, action_current, (offset - 1), mask_stacked
 
 
 class DCSLAOMHFDataset(IterableDataset):
@@ -295,6 +300,7 @@ class DCSLAOMHFDataset(IterableDataset):
         self.obs_buffer = []
         self.action_buffer = []
         self.state_buffer = []
+        self.mask_buffer = []  # Buffer for masks when use_masked_obs is enabled
         
     def _process_observation(self, obs_array):
         """Convert observation to tensor and move to device"""
@@ -325,6 +331,7 @@ class DCSLAOMHFDataset(IterableDataset):
         self.obs_buffer = []
         self.action_buffer = []
         self.state_buffer = []
+        self.mask_buffer = []
         
         for sample in self.dataset:
             obs = self._process_observation(sample["observation"])
@@ -334,36 +341,41 @@ class DCSLAOMHFDataset(IterableDataset):
                 action = torch.clamp(action, min=-1.0, max=1.0)
             state = torch.tensor(sample["state"], dtype=torch.float32, device=self.device)
             
-            # Apply mask if enabled
+            # Process mask if enabled
+            mask_tensor = None
             if self.use_masked_obs:
                 # Load mask from HuggingFace sample
                 mask = sample["mask"]
                 # Convert mask to tensor (handle PIL Image or numpy array)
                 if hasattr(mask, 'mode'):  # PIL Image
                     mask = np.array(mask)
-                mask = torch.tensor(mask, dtype=torch.float32, device=self.device)
+                mask_tensor = torch.tensor(mask, dtype=torch.float32, device=self.device)
                 
                 # Expand mask from (H, W) to (H, W, 3) for RGB channels
-                if mask.ndim == 2:
-                    mask = mask.unsqueeze(-1).repeat(1, 1, 3)
+                if mask_tensor.ndim == 2:
+                    mask_tensor = mask_tensor.unsqueeze(-1).repeat(1, 1, 3)
                 
                 # Normalize mask to 0-1 range if needed
-                if mask.max() > 1.0:
-                    mask = mask / 255.0
+                if mask_tensor.max() > 1.0:
+                    mask_tensor = mask_tensor / 255.0
                 
                 # Apply mask to observation (element-wise multiplication)
-                obs = obs.float() * mask
+                obs = obs.float() * mask_tensor
                 obs = obs.to(torch.uint8)
             
             self.obs_buffer.append(obs)
             self.action_buffer.append(action)
             self.state_buffer.append(state)
+            if self.use_masked_obs:
+                self.mask_buffer.append(mask_tensor)
             
             # Keep buffer size manageable
             if len(self.obs_buffer) > self.buffer_size:
                 self.obs_buffer.pop(0)
                 self.action_buffer.pop(0)
                 self.state_buffer.pop(0)
+                if self.use_masked_obs and len(self.mask_buffer) > 0:
+                    self.mask_buffer.pop(0)
             
             # Need at least max_offset + 1 frames to create a sample
             if len(self.obs_buffer) >= self.max_offset + 1:
@@ -382,7 +394,13 @@ class DCSLAOMHFDataset(IterableDataset):
                 action_current = self.action_buffer[current_idx]
                 state_current = self.state_buffer[current_idx]
                 
-                yield obs_stacked, next_obs_stacked, future_obs_stacked, action_current, state_current, (offset - 1)
+                # Get mask if using masked observations
+                if self.use_masked_obs:
+                    # Stack masks the same way as observations
+                    mask_stacked = self._get_stacked_obs(self.mask_buffer, current_idx)
+                    yield obs_stacked, next_obs_stacked, future_obs_stacked, action_current, state_current, (offset - 1), mask_stacked
+                else:
+                    yield obs_stacked, next_obs_stacked, future_obs_stacked, action_current, state_current, (offset - 1)
 
 
 class DCSLAOMInMemoryDataset(Dataset):
