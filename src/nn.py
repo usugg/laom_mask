@@ -676,3 +676,102 @@ class LAOMDINOv2(nn.Module):
         next_obs_features_norm = self.feature_norm(next_obs_features)
         latent_action = self.act_head(obs_features_norm, next_obs_features_norm)
         return latent_action
+
+
+class LAPODINOv3(nn.Module):
+    """
+    LAPO that works with DINOv3 patch-pooled features instead of raw pixels.
+    
+    Uses spatial average pooling over DINOv3 patch tokens for better motion detection.
+    Architecture matches LAPO but operates in feature space.
+    """
+    
+    def __init__(
+        self,
+        feature_dim=1152,  # DINOv3-ViT-S (384) * 3 frames
+        latent_act_dim=128,
+        act_head_dim=1024,
+        act_head_dropout=0.0,
+        obs_head_dim=1024,
+        obs_head_dropout=0.0,
+    ):
+        """
+        Initialize LAPODINOv3.
+        
+        Args:
+            feature_dim: Dimension of stacked DINOv3 features (384 * frame_stack)
+            latent_act_dim: Dimension of latent action space
+            act_head_dim: Hidden dimension for action (IDM) head
+            act_head_dropout: Dropout for action head
+            obs_head_dim: Hidden dimension for observation (FDM) head
+            obs_head_dropout: Dropout for observation head
+        """
+        super().__init__()
+        
+        self.feature_dim = feature_dim
+        self.latent_act_dim = latent_act_dim
+        
+        # Layer norm for feature stability
+        self.feature_norm = nn.LayerNorm(feature_dim, elementwise_affine=False)
+        
+        # IDM head: (obs_features, future_obs_features) -> latent_action
+        self.idm_head = LatentActHead(
+            latent_act_dim, 
+            feature_dim, 
+            act_head_dim, 
+            dropout=act_head_dropout
+        )
+        
+        # FDM head: (obs_features, latent_action) -> next_obs_features
+        self.fdm_head = LatentObsHead(
+            latent_act_dim, 
+            feature_dim, 
+            obs_head_dim, 
+            dropout=obs_head_dropout
+        )
+        
+        # For compatibility with existing code
+        self.final_encoder_shape = (feature_dim,)
+        
+        self.apply(weight_init)
+    
+    def forward(self, obs_features, future_obs_features):
+        """
+        Forward pass with DINOv3 features.
+        
+        Args:
+            obs_features: Tensor of shape (B, feature_dim) - current observation features
+            future_obs_features: Tensor of shape (B, feature_dim) - future observation features
+        
+        Returns:
+            pred_next_obs: Predicted next observation features (B, feature_dim)
+            latent_action: Predicted latent action (B, latent_act_dim)
+        """
+        # Normalize features
+        obs_norm = self.feature_norm(obs_features)
+        future_obs_norm = self.feature_norm(future_obs_features)
+        
+        # IDM: predict latent action from (obs, future_obs)
+        latent_action = self.idm_head(obs_norm, future_obs_norm)
+        
+        # FDM: predict next observation features from (obs, latent_action)
+        pred_next_obs = self.fdm_head(obs_norm.detach(), latent_action)
+        
+        return pred_next_obs, latent_action
+    
+    @torch.no_grad()
+    def label(self, obs_features, future_obs_features):
+        """
+        Generate latent action labels (for BC training).
+        
+        Args:
+            obs_features: Tensor of shape (B, feature_dim)
+            future_obs_features: Tensor of shape (B, feature_dim)
+        
+        Returns:
+            latent_action: Tensor of shape (B, latent_act_dim)
+        """
+        obs_norm = self.feature_norm(obs_features)
+        future_obs_norm = self.feature_norm(future_obs_features)
+        latent_action = self.idm_head(obs_norm, future_obs_norm)
+        return latent_action
