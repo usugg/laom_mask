@@ -248,7 +248,7 @@ class DCSLAPOHFDataset(IterableDataset):
                 next_obs_stacked = self._get_stacked_obs(self.obs_buffer, current_idx + 1)
                 
                 # Random offset for future observation
-                offset = random.randint(1, self.max_offset)
+                offset = self.max_offset
                 future_obs_stacked = self._get_stacked_obs(self.obs_buffer, current_idx + offset)
                 
                 # Get corresponding action

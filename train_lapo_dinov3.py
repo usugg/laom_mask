@@ -55,10 +55,11 @@ class LAPOConfig:
     dinov3_model_name: str = "facebook/dinov3-vits16-pretrain-lvd1689m"
     upscale_size: int = 224
     freeze_dinov3: bool = True
-    use_patch_pooling: bool = True
+    pooling_mode: str = "topk_variance"  # 'avg', 'adaptive_4x4', 'flatten', 'cls', 'topk_variance'
+    topk: int = 32  # Number of patches to keep for topk_variance mode
     
     # Model architecture
-    feature_dim: int = 1152  # DINOv3-ViT-S (384) * 3 frames
+    feature_dim: int = 225792  # Will be overridden by encoder.output_dim * frame_stack
     latent_action_dim: int = 128
     act_head_dim: int = 1024
     act_head_dropout: float = 0.0
@@ -129,9 +130,9 @@ def extract_dinov3_features(images, dinov3_encoder, config):
     # Extract features (with patch pooling)
     features = dinov3_encoder(images_preprocessed)  # (B*num_frames, 384)
     
-    # Reshape back to batch: (B*num_frames, 384) -> (B, num_frames * 384)
+    # Reshape back to batch: (B*num_frames, output_dim) -> (B, num_frames * output_dim)
     if num_frames > 1:
-        features = features.reshape(batch_size, num_frames * dinov3_encoder.feature_dim)
+        features = features.reshape(batch_size, num_frames * dinov3_encoder.output_dim)
     
     return features
 
@@ -142,9 +143,14 @@ def train_lapo_dinov3(config: LAPOConfig):
     dinov3_encoder = DINOv3Encoder(
         model_name=config.dinov3_model_name,
         freeze=config.freeze_dinov3,
-        use_patch_pooling=config.use_patch_pooling,
+        pooling_mode=config.pooling_mode,
+        topk=config.topk,
         device=DEVICE,
     )
+    
+    # Calculate actual feature_dim from encoder
+    actual_feature_dim = dinov3_encoder.output_dim * config.frame_stack
+    print(f"Actual feature dimension: {actual_feature_dim} (encoder: {dinov3_encoder.output_dim} × {config.frame_stack} frames)")
     
     # Load dataset
     if config.use_hf_dataset:
@@ -168,7 +174,7 @@ def train_lapo_dinov3(config: LAPOConfig):
     
     # Create LAPO model for DINOv3 features
     lapo = LAPODINOv3(
-        feature_dim=config.feature_dim,
+        feature_dim=actual_feature_dim,
         latent_act_dim=config.latent_action_dim,
         act_head_dim=config.act_head_dim,
         act_head_dropout=config.act_head_dropout,
@@ -177,7 +183,7 @@ def train_lapo_dinov3(config: LAPOConfig):
     ).to(DEVICE)
     
     print(f"LAPO-DINOv3 model:")
-    print(f"  Feature dim: {config.feature_dim}")
+    print(f"  Feature dim: {actual_feature_dim}")
     print(f"  Latent action dim: {config.latent_action_dim}")
     print(f"  Act head dim: {config.act_head_dim}")
     print(f"  Obs head dim: {config.obs_head_dim}")

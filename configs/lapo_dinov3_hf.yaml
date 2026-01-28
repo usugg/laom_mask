@@ -12,11 +12,12 @@ lapo:
   dinov3_model_name: "facebook/dinov3-vits16-pretrain-lvd1689m"
   upscale_size: 224
   freeze_dinov3: true
-  use_patch_pooling: true  # Spatial average over patch tokens
+  pooling_mode: "topk_variance"  # 'avg', 'adaptive_4x4', 'flatten', 'cls', 'topk_variance'
+  topk: 32  # Number of patches to keep (highest variance)
   
   # --- Training parameters (matching lapo_hf.yaml) ---
   num_epochs: 10          
-  batch_size: 512
+  batch_size: 512  # Increased batch size (features are smaller now: 32 patches)
   future_obs_offset: 10   
   learning_rate: 0.0001   
   weight_decay: 0.0
@@ -24,7 +25,7 @@ lapo:
   grad_norm: null
   
   # --- Model architecture ---
-  feature_dim: 1152  # DINOv3-ViT-S (384) * 3 frames = 1152
+  feature_dim: 74112  # (384+2 coordinates)*64 patches * 3 frames = 74112 (auto-calculated)
   latent_action_dim: 128 
   act_head_dim: 1024
   act_head_dropout: 0.0
